@@ -265,6 +265,8 @@ export default function Home() {
   const [customHeight, setCustomHeight] = useState(2400);
   const [month, setMonth] = useState("2026-07");
   const [monthText, setMonthText] = useState("2026-07");
+  const [monthPickerOpen, setMonthPickerOpen] = useState(false);
+  const [monthPickerYear, setMonthPickerYear] = useState(2026);
   const [weekStart, setWeekStart] = useState<"sunday" | "monday">("sunday");
   const [backgroundMode, setBackgroundMode] = useState<"team" | "midnight" | "forest" | "sunset" | "ivory" | "color" | "photo">("team");
   const [backgroundColor, setBackgroundColor] = useState("#203A62");
@@ -687,9 +689,38 @@ export default function Home() {
             <div className="step-title"><b>02</b><span>월 선택</span></div>
             <div className="month-choice">
               <label><span>직접 입력</span><input className="field" inputMode="numeric" maxLength={7} placeholder="2026-07" value={monthText} onChange={(event) => updateMonth(event.target.value)} onBlur={() => { if (monthText !== month) setMonthText(month); }} /></label>
-              <label><span>캘린더에서 선택</span><input className="field" type="month" aria-label="캘린더에서 월 선택" value={month} onChange={(event) => updateMonth(event.target.value)} /></label>
+              <div className="month-picker">
+                <span>캘린더에서 선택</span>
+                <button
+                  type="button"
+                  className="field month-picker-trigger"
+                  aria-label="달력에서 월 선택"
+                  aria-expanded={monthPickerOpen}
+                  onClick={() => {
+                    setMonthPickerYear(Number(month.slice(0, 4)));
+                    setMonthPickerOpen((current) => !current);
+                  }}
+                >
+                  <strong>{month}</strong><b aria-hidden="true">▾</b>
+                </button>
+                {monthPickerOpen && (
+                  <div className="month-picker-popover" role="dialog" aria-label="월 선택">
+                    <div className="month-picker-head">
+                      <button type="button" aria-label="이전 연도" onClick={() => setMonthPickerYear((year) => year - 1)}>‹</button>
+                      <strong>{monthPickerYear}년</strong>
+                      <button type="button" aria-label="다음 연도" onClick={() => setMonthPickerYear((year) => year + 1)}>›</button>
+                    </div>
+                    <div className="month-picker-grid">
+                      {Array.from({ length: 12 }, (_, index) => {
+                        const value = `${monthPickerYear}-${String(index + 1).padStart(2, "0")}`;
+                        return <button key={value} type="button" className={month === value ? "selected" : ""} onClick={() => { updateMonth(value); setMonthPickerOpen(false); }}>{index + 1}월</button>;
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
-            <small className="month-help">직접 입력은 YYYY-MM 형식으로 입력하세요.</small>
+            <small className="month-help">직접 입력하거나 오른쪽 달력에서 원하는 연·월을 선택하세요.</small>
           </div>
 
           <div className="quick-start-note">
