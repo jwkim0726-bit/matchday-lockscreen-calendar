@@ -1,6 +1,7 @@
 "use client";
 
 import { ChangeEvent, PointerEvent, useEffect, useMemo, useRef, useState } from "react";
+import { trackEvent } from "@/lib/analytics";
 
 type Team = {
   id: string;
@@ -68,6 +69,16 @@ function sortTeamsAlphabetically(items: Team[]) {
 
 function firstTeamFor(sport: Team["sport"], league?: string) {
   return sortTeamsAlphabetically(teams.filter((item) => item.sport === sport && (!league || item.league === league)))[0];
+}
+
+function analyticsSport(sport: Team["sport"]) {
+  if (sport === "kbaseball") return "baseball";
+  if (sport === "kfootball" || sport === "wfootball") return "football";
+  return sport;
+}
+
+function analyticsTeam(team: Team) {
+  return team.name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
 }
 
 const d = (family: string, id: string, name: string, year: number, width: number, height: number): Device => ({ family, id, name, year, width, height });
@@ -256,6 +267,8 @@ export default function Home() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const calendarDragRef = useRef<{ x: number; y: number; scale: number; ratio: number } | null>(null);
   const downloadNoticeTimerRef = useRef<number | null>(null);
+  const customizeStartedRef = useRef(false);
+  const downloadTrackingLockedRef = useRef(false);
   const [sport, setSport] = useState<Team["sport"]>("kbaseball");
   const [league, setLeague] = useState("KBO");
   const [teamId, setTeamId] = useState(() => firstTeamFor("kbaseball", "KBO")?.id ?? teams[0].id);
@@ -389,6 +402,31 @@ export default function Home() {
       : "일정이 잘 읽히는 밀도예요. 원하는 방식으로 꾸며보세요.";
   const [year, monthNumber] = month.split("-").map(Number);
   const monthLabel = new Intl.DateTimeFormat("en-US", { month: "long" }).format(new Date(year, monthNumber - 1, 1)).toUpperCase();
+
+  function analyticsContext(selectedTeam = team, selectedMonth = month) {
+    return {
+      sport: analyticsSport(selectedTeam.sport),
+      team: analyticsTeam(selectedTeam),
+      month: selectedMonth,
+    };
+  }
+
+  function markCustomizeStart() {
+    if (customizeStartedRef.current) return;
+    customizeStartedRef.current = true;
+    trackEvent("customize_start", analyticsContext());
+  }
+
+  function chooseTeam(nextTeam: Team) {
+    if (nextTeam.id === teamId) return;
+    setSport(nextTeam.sport);
+    setLeague(nextTeam.league);
+    setTeamId(nextTeam.id);
+    trackEvent("team_select", {
+      sport: analyticsSport(nextTeam.sport),
+      team: analyticsTeam(nextTeam),
+    });
+  }
 
   async function syncSchedule() {
     setSyncState("loading");
@@ -548,6 +586,8 @@ export default function Home() {
       setBackgroundImage(image);
       setBackgroundImageName(file.name);
       setBackgroundMode("photo");
+      markCustomizeStart();
+      trackEvent("background_upload", analyticsContext());
     };
     image.src = URL.createObjectURL(file);
   }
@@ -560,6 +600,7 @@ export default function Home() {
       setEventImage(image);
       setEventImageName(file.name);
       setEventDisplayMode("photo");
+      markCustomizeStart();
     };
     image.src = URL.createObjectURL(file);
   }
@@ -578,6 +619,18 @@ export default function Home() {
     link.href = canvas.toDataURL("image/png");
     link.click();
 
+    if (!downloadTrackingLockedRef.current) {
+      downloadTrackingLockedRef.current = true;
+      trackEvent("wallpaper_download", {
+        ...analyticsContext(),
+        screen_type: previewMode === "lock" ? "lockscreen" : "wallpaper",
+        custom_background: backgroundMode === "photo" && Boolean(backgroundImage),
+        display_style: eventDisplayMode,
+        resolution: renderScale === 2 ? "2x" : "original",
+      });
+      window.setTimeout(() => { downloadTrackingLockedRef.current = false; }, 1000);
+    }
+
     setDownloadNotice(true);
     if (downloadNoticeTimerRef.current) window.clearTimeout(downloadNoticeTimerRef.current);
 
@@ -594,22 +647,23 @@ export default function Home() {
         summary: `${Number(month.split("-")[1])}월 ${teamName} 배경화면 완성🎉\n다음 경기도 잠금화면에서 한눈에 확인하세요.`,
         tags: [`#${teamTag}`, `#${sportLabel}`, "#Matchday"],
       });
+      customizeStartedRef.current = false;
     }, 850);
   }
 
   function updateMonth(value: string) {
     setMonthText(value);
     if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(value)) return;
+    if (value === month) return;
     setMonth(value);
     setNewDate(`${value}-10`);
+    trackEvent("month_select", analyticsContext(team, value));
   }
 
   function selectSport(nextSport: Team["sport"]) {
     const firstTeam = firstTeamFor(nextSport);
     if (!firstTeam) return;
-    setSport(nextSport);
-    setLeague(firstTeam.league);
-    setTeamId(firstTeam.id);
+    chooseTeam(firstTeam);
   }
 
   function selectSportTab(nextTab: SportTab) {
@@ -619,8 +673,7 @@ export default function Home() {
 
   function selectLeague(nextLeague: string) {
     const firstTeam = firstTeamFor(sport, nextLeague);
-    setLeague(nextLeague);
-    if (firstTeam) setTeamId(firstTeam.id);
+    if (firstTeam) chooseTeam(firstTeam);
   }
 
   function startCalendarResize(event: PointerEvent<HTMLButtonElement>) {
@@ -631,12 +684,23 @@ export default function Home() {
   function resizeCalendar(event: PointerEvent<HTMLButtonElement>) {
     const drag = calendarDragRef.current;
     if (!drag) return;
+    if (event.clientX === drag.x && (calendarResizeMode !== "free" || event.clientY === drag.y)) return;
+    markCustomizeStart();
     setCalendarScale(Math.min(1.22, Math.max(0.72, drag.scale + (event.clientX - drag.x) / 360)));
     if (calendarResizeMode === "free") setCalendarRatio(Math.min(1.3, Math.max(0.72, drag.ratio + (event.clientY - drag.y) / 320)));
   }
 
   function stopCalendarResize() {
     calendarDragRef.current = null;
+  }
+
+  function selectScreenType(nextMode: "lock" | "home") {
+    if (nextMode === previewMode) return;
+    setPreviewMode(nextMode);
+    trackEvent("screen_type_select", {
+      ...analyticsContext(),
+      screen_type: nextMode === "lock" ? "lockscreen" : "wallpaper",
+    });
   }
 
   return (
@@ -673,7 +737,7 @@ export default function Home() {
             </div>
             <div className="team-grid">
               {visibleTeams.map((item) => (
-                <button key={item.id} className={`team-card ${teamId === item.id ? "selected" : ""}`} onClick={() => setTeamId(item.id)} style={{ "--team": item.primary, "--mascot-bg": mascotBadgeTone(item, clubEmojiOverrides[item.id]?.trim() || mascotSymbol(item)) } as React.CSSProperties}>
+                <button key={item.id} className={`team-card ${teamId === item.id ? "selected" : ""}`} onClick={() => chooseTeam(item)} style={{ "--team": item.primary, "--mascot-bg": mascotBadgeTone(item, clubEmojiOverrides[item.id]?.trim() || mascotSymbol(item)) } as React.CSSProperties}>
                   <span className="mini-badge" aria-label={`${item.name} 마스코트`}>{clubEmojiOverrides[item.id]?.trim() || mascotSymbol(item)}</span>
                   <span><small>{item.city}</small><strong>{item.name}</strong></span>
                 </button>
@@ -746,13 +810,13 @@ export default function Home() {
                       <div className="device-picker-menu" id="device-options" role="listbox" aria-label="기기 선택">
                         <input className="device-search" value={deviceQuery} onChange={(event) => setDeviceQuery(event.target.value)} placeholder="기기명 또는 연도로 검색" aria-label="기기 검색" />
                         {recentDevices.length > 0 && !deviceQuery && <div className="device-picker-group recent-devices"><p>최근 선택</p>{recentDevices.map((item) => (
-                          <button type="button" key={item.id} role="option" aria-selected={deviceId === item.id} className={deviceId === item.id ? "selected" : ""} onClick={() => { setDeviceId(item.id); setRecentDeviceIds((current) => [item.id, ...current.filter((id) => id !== item.id)].slice(0, 3)); setShowDeviceMenu(false); }}><strong>{item.name}</strong><small>{item.width} × {item.height}px</small></button>
+                          <button type="button" key={item.id} role="option" aria-selected={deviceId === item.id} className={deviceId === item.id ? "selected" : ""} onClick={() => { if (deviceId !== item.id) markCustomizeStart(); setDeviceId(item.id); setRecentDeviceIds((current) => [item.id, ...current.filter((id) => id !== item.id)].slice(0, 3)); setShowDeviceMenu(false); }}><strong>{item.name}</strong><small>{item.width} × {item.height}px</small></button>
                         ))}</div>}
                         {deviceResults.map((group) => (
                           <div className="device-picker-group" key={group.label}>
                             <p>{group.label}</p>
                             {group.items.map((item) => (
-                              <button type="button" key={item.id} role="option" aria-selected={deviceId === item.id} className={deviceId === item.id ? "selected" : ""} onClick={() => { setDeviceId(item.id); setRecentDeviceIds((current) => item.id === "custom" ? current : [item.id, ...current.filter((id) => id !== item.id)].slice(0, 3)); setShowDeviceMenu(false); }}>
+                              <button type="button" key={item.id} role="option" aria-selected={deviceId === item.id} className={deviceId === item.id ? "selected" : ""} onClick={() => { if (deviceId !== item.id) markCustomizeStart(); setDeviceId(item.id); setRecentDeviceIds((current) => item.id === "custom" ? current : [item.id, ...current.filter((id) => id !== item.id)].slice(0, 3)); setShowDeviceMenu(false); }}>
                                 <strong>{item.id === "custom" ? "커스텀" : item.name}</strong>
                                 <small>{item.id === "custom" ? "원하는 배경화면 크기 직접 입력" : `${item.width} × ${item.height}px`}</small>
                               </button>
@@ -764,9 +828,9 @@ export default function Home() {
                   </div>
                   {deviceId === "custom" && (
                     <div className="custom-size">
-                      <label>가로<input type="number" min="320" max="5000" value={customWidth} onChange={(event) => setCustomWidth(Math.max(320, Number(event.target.value)))} /></label>
+                      <label>가로<input type="number" min="320" max="5000" value={customWidth} onChange={(event) => { markCustomizeStart(); setCustomWidth(Math.max(320, Number(event.target.value))); }} /></label>
                       <span>×</span>
-                      <label>세로<input type="number" min="480" max="6000" value={customHeight} onChange={(event) => setCustomHeight(Math.max(480, Number(event.target.value)))} /></label>
+                      <label>세로<input type="number" min="480" max="6000" value={customHeight} onChange={(event) => { markCustomizeStart(); setCustomHeight(Math.max(480, Number(event.target.value))); }} /></label>
                     </div>
                   )}
                   <p className="preference-note"><span>✓ 내 팀 · 내 기기 기억하기</span><small>다음 방문에도 이 브라우저에서 자동으로 불러와요.</small></p>
@@ -774,8 +838,8 @@ export default function Home() {
                 <div>
                   <div className="step-title"><span>한 주의 시작</span></div>
                   <div className="week-start" aria-label="한 주의 시작 요일">
-                    <button className={weekStart === "sunday" ? "active" : ""} onClick={() => setWeekStart("sunday")}>일요일 시작</button>
-                    <button className={weekStart === "monday" ? "active" : ""} onClick={() => setWeekStart("monday")}>월요일 시작</button>
+                    <button className={weekStart === "sunday" ? "active" : ""} onClick={() => { if (weekStart !== "sunday") markCustomizeStart(); setWeekStart("sunday"); }}>일요일 시작</button>
+                    <button className={weekStart === "monday" ? "active" : ""} onClick={() => { if (weekStart !== "monday") markCustomizeStart(); setWeekStart("monday"); }}>월요일 시작</button>
                   </div>
                 </div>
               </div>
@@ -783,10 +847,10 @@ export default function Home() {
               <div className="step">
                 <div className="step-title"><span>홈·원정 색상</span></div>
                 <div className="home-away-guide">
-                  <div className="guide-head"><span>홈·원정 표시 색상</span><button onClick={() => { setHomeGameColor("#FFFFFF"); setAwayGameColor("#738095"); }}>기본값 복원</button></div>
+                  <div className="guide-head"><span>홈·원정 표시 색상</span><button onClick={() => { if (homeGameColor !== "#FFFFFF" || awayGameColor !== "#738095") markCustomizeStart(); setHomeGameColor("#FFFFFF"); setAwayGameColor("#738095"); }}>기본값 복원</button></div>
                   <div className="guide-colors">
-                    <label><input aria-label="홈 경기 색상" type="color" value={homeGameColor} onChange={(event) => setHomeGameColor(event.target.value)} /><span><strong>홈 경기</strong><small>기본 흰색 · 상대 앞에 vs</small></span></label>
-                    <label><input aria-label="원정 경기 색상" type="color" value={awayGameColor} onChange={(event) => setAwayGameColor(event.target.value)} /><span><strong>원정 경기</strong><small>기본 슬레이트 블루 · 상대 앞에 @</small></span></label>
+                    <label><input aria-label="홈 경기 색상" type="color" value={homeGameColor} onChange={(event) => { markCustomizeStart(); setHomeGameColor(event.target.value); }} /><span><strong>홈 경기</strong><small>기본 흰색 · 상대 앞에 vs</small></span></label>
+                    <label><input aria-label="원정 경기 색상" type="color" value={awayGameColor} onChange={(event) => { markCustomizeStart(); setAwayGameColor(event.target.value); }} /><span><strong>원정 경기</strong><small>기본 슬레이트 블루 · 상대 앞에 @</small></span></label>
                   </div>
                 </div>
               </div>
@@ -801,14 +865,14 @@ export default function Home() {
                 { id: "sunset", label: "선셋", colors: ["#9D4773", "#F28A5B"] },
                 { id: "ivory", label: "아이보리", colors: ["#EEE8DA", "#BDAE91"] },
               ].map((item) => (
-                <button key={item.id} className={backgroundMode === item.id ? "selected" : ""} onClick={() => setBackgroundMode(item.id as typeof backgroundMode)}>
+                <button key={item.id} className={backgroundMode === item.id ? "selected" : ""} onClick={() => { if (backgroundMode !== item.id) markCustomizeStart(); setBackgroundMode(item.id as typeof backgroundMode); }}>
                   <i style={{ background: `linear-gradient(135deg, ${item.colors[0]}, ${item.colors[1]})` }} /><span>{item.label}</span>
                 </button>
               ))}
             </div>
             <div className="custom-background">
               <label className={backgroundMode === "color" ? "active" : ""}>
-                <span>직접 색상 선택</span><input type="color" value={backgroundColor} onChange={(event) => { setBackgroundColor(event.target.value); setBackgroundMode("color"); }} />
+                <span>직접 색상 선택</span><input type="color" value={backgroundColor} onChange={(event) => { markCustomizeStart(); setBackgroundColor(event.target.value); setBackgroundMode("color"); }} />
               </label>
             </div>
             <label className={`upload ${backgroundMode === "photo" ? "active" : ""}`}>
@@ -819,34 +883,34 @@ export default function Home() {
               <div className="calendar-style">
                 <div className="calendar-style-head"><strong>달력 패널</strong><small>색상과 투명도를 조절하세요</small></div>
                 <div className="calendar-style-row">
-                  <label className="calendar-color"><span>색상</span><input type="color" value={calendarColor} onChange={(event) => setCalendarColor(event.target.value)} /></label>
-                  <label className="calendar-opacity"><span>투명도 <b>{100 - calendarOpacity}%</b></span><input type="range" min="0" max="100" step="1" value={100 - calendarOpacity} onChange={(event) => setCalendarOpacity(100 - Number(event.target.value))} /></label>
+                  <label className="calendar-color"><span>색상</span><input type="color" value={calendarColor} onChange={(event) => { markCustomizeStart(); setCalendarColor(event.target.value); }} /></label>
+                  <label className="calendar-opacity"><span>투명도 <b>{100 - calendarOpacity}%</b></span><input type="range" min="0" max="100" step="1" value={100 - calendarOpacity} onChange={(event) => { markCustomizeStart(); setCalendarOpacity(100 - Number(event.target.value)); }} /></label>
                 </div>
-                <label className="calendar-text-size"><span>달력 텍스트 크기 <b>{calendarTextScale}%</b></span><input type="range" min="80" max="140" step="5" value={calendarTextScale} onChange={(event) => setCalendarTextScale(Number(event.target.value))} /></label>
+                <label className="calendar-text-size"><span>달력 텍스트 크기 <b>{calendarTextScale}%</b></span><input type="range" min="80" max="140" step="5" value={calendarTextScale} onChange={(event) => { markCustomizeStart(); setCalendarTextScale(Number(event.target.value)); }} /></label>
               </div>
             <div className="event-marker-style">
               <div className="calendar-style-head"><strong>경기 일정 표시</strong><small>경기 칸에 표시할 내용을 선택하세요</small></div>
               <div className="event-display-tabs">
-                <button className={eventDisplayMode === "text" ? "active" : ""} onClick={() => setEventDisplayMode("text")}><b>ABC</b><span>텍스트</span></button>
-                <button className={eventDisplayMode === "mascot" ? "active" : ""} onClick={() => setEventDisplayMode("mascot")}><b>{selectedClubEmoji}</b><span>구단 이모지</span></button>
-                <button className={eventDisplayMode === "emoji" ? "active" : ""} onClick={() => setEventDisplayMode("emoji")}><b>{homeEventEmoji || "🏠"}/{awayEventEmoji || "🚌"}</b><span>커스텀 이모지</span></button>
-                <button className={eventDisplayMode === "photo" ? "active" : ""} onClick={() => setEventDisplayMode("photo")}><b>▧</b><span>사진</span></button>
+                <button className={eventDisplayMode === "text" ? "active" : ""} onClick={() => { if (eventDisplayMode !== "text") markCustomizeStart(); setEventDisplayMode("text"); }}><b>ABC</b><span>텍스트</span></button>
+                <button className={eventDisplayMode === "mascot" ? "active" : ""} onClick={() => { if (eventDisplayMode !== "mascot") markCustomizeStart(); setEventDisplayMode("mascot"); }}><b>{selectedClubEmoji}</b><span>구단 이모지</span></button>
+                <button className={eventDisplayMode === "emoji" ? "active" : ""} onClick={() => { if (eventDisplayMode !== "emoji") markCustomizeStart(); setEventDisplayMode("emoji"); }}><b>{homeEventEmoji || "🏠"}/{awayEventEmoji || "🚌"}</b><span>커스텀 이모지</span></button>
+                <button className={eventDisplayMode === "photo" ? "active" : ""} onClick={() => { if (eventDisplayMode !== "photo") markCustomizeStart(); setEventDisplayMode("photo"); }}><b>▧</b><span>사진</span></button>
               </div>
               <div className="game-time-control">
                 <span><strong>경기 시간 표시</strong><small>텍스트 일정에 경기 시간을 함께 표시합니다</small></span>
-                <button type="button" className={showGameTime ? "active" : ""} onClick={() => setShowGameTime((current) => !current)} aria-pressed={showGameTime}>{showGameTime ? "표시" : "숨김"}</button>
+                <button type="button" className={showGameTime ? "active" : ""} onClick={() => { markCustomizeStart(); setShowGameTime((current) => !current); }} aria-pressed={showGameTime}>{showGameTime ? "표시" : "숨김"}</button>
               </div>
               <p className="density-tip" role="status">{densityTip}</p>
               {eventDisplayMode === "emoji" && (
                 <div className="emoji-pair">
-                  <label className="emoji-input"><span>홈 경기</span><input value={homeEventEmoji} maxLength={8} onChange={(event) => setHomeEventEmoji(event.target.value)} placeholder="🏠" /></label>
-                  <label className="emoji-input"><span>원정 경기</span><input value={awayEventEmoji} maxLength={8} onChange={(event) => setAwayEventEmoji(event.target.value)} placeholder="🚌" /></label>
+                  <label className="emoji-input"><span>홈 경기</span><input value={homeEventEmoji} maxLength={8} onChange={(event) => { markCustomizeStart(); setHomeEventEmoji(event.target.value); }} placeholder="🏠" /></label>
+                  <label className="emoji-input"><span>원정 경기</span><input value={awayEventEmoji} maxLength={8} onChange={(event) => { markCustomizeStart(); setAwayEventEmoji(event.target.value); }} placeholder="🚌" /></label>
                 </div>
               )}
               {eventDisplayMode === "mascot" && (
                 <div className="club-emoji-custom">
-                  <label className="emoji-input"><span>현재 구단 이모지</span><input value={clubEmojiOverrides[team.id] ?? mascotSymbol(team)} maxLength={8} onChange={(event) => setClubEmojiOverrides((current) => ({ ...current, [team.id]: event.target.value }))} /></label>
-                  <button type="button" onClick={() => setClubEmojiOverrides((current) => { const next = { ...current }; delete next[team.id]; return next; })}>기본값 복원</button>
+                  <label className="emoji-input"><span>현재 구단 이모지</span><input value={clubEmojiOverrides[team.id] ?? mascotSymbol(team)} maxLength={8} onChange={(event) => { markCustomizeStart(); setClubEmojiOverrides((current) => ({ ...current, [team.id]: event.target.value })); }} /></label>
+                  <button type="button" onClick={() => { if (team.id in clubEmojiOverrides) markCustomizeStart(); setClubEmojiOverrides((current) => { const next = { ...current }; delete next[team.id]; return next; }); }}>기본값 복원</button>
                 </div>
               )}
               <label className={`marker-upload ${eventDisplayMode === "photo" ? "active" : ""}`}>
@@ -885,12 +949,12 @@ export default function Home() {
         <section className="preview-panel">
           <div className="preview-head">
             <div><p>LIVE PREVIEW</p><strong>{device.name}</strong><span>{device.width} × {device.height}px</span></div>
-            <div className="export-actions"><div className="export-quality" aria-label="저장 해상도"><span>저장 해상도</span><div><button type="button" className={exportQuality === "native" ? "active" : ""} onClick={() => setExportQuality("native")}>원본</button><button type="button" className={exportQuality === "double" ? "active" : ""} onClick={() => setExportQuality("double")} disabled={!canExportDouble}>2× 고화질</button></div></div><button className="download" onClick={download}>저장↓</button></div>
+            <div className="export-actions"><div className="export-quality" aria-label="저장 해상도"><span>저장 해상도</span><div><button type="button" className={exportQuality === "native" ? "active" : ""} onClick={() => { if (exportQuality !== "native") markCustomizeStart(); setExportQuality("native"); }}>원본</button><button type="button" className={exportQuality === "double" ? "active" : ""} onClick={() => { if (exportQuality !== "double") markCustomizeStart(); setExportQuality("double"); }} disabled={!canExportDouble}>2× 고화질</button></div></div><button className="download" onClick={download}>저장↓</button></div>
           </div>
           <p className="export-note">{renderScale === 2 ? `2× 고화질 · ${device.width * 2} × ${device.height * 2}px로 다시 그려 저장합니다.` : "원본 해상도 · 선택한 기기에 가장 알맞은 PNG 크기로 저장합니다."}</p>
           <div className="calendar-drag-hint"><span><strong>달력 크기 조절</strong><small>미리보기 안의 ↘ 아이콘을 잡아 드래그하면 달력의 크기와 세로 비율이 바뀝니다.</small></span><div className="resize-mode-tabs"><button type="button" className={calendarResizeMode === "locked" ? "active" : ""} onClick={() => setCalendarResizeMode("locked")}>비율 유지</button><button type="button" className={calendarResizeMode === "free" ? "active" : ""} onClick={() => setCalendarResizeMode("free")}>자유 조절</button></div><button className="resize-reset" type="button" onClick={() => { setCalendarScale(1); setCalendarRatio(1); }}>기본값 복원</button></div>
           <div className="preview-mode-controls" aria-label="미리보기 화면 선택">
-            <div className="preview-mode-tabs"><button type="button" className={previewMode === "lock" ? "active" : ""} onClick={() => setPreviewMode("lock")}>잠금화면</button><button type="button" className={previewMode === "home" ? "active" : ""} onClick={() => setPreviewMode("home")}>배경화면</button></div>
+            <div className="preview-mode-tabs"><button type="button" className={previewMode === "lock" ? "active" : ""} onClick={() => selectScreenType("lock")}>잠금화면</button><button type="button" className={previewMode === "home" ? "active" : ""} onClick={() => selectScreenType("home")}>배경화면</button></div>
             {previewMode === "lock" && <div className="lock-preview-options"><button type="button" className={showLockClock ? "active" : ""} onClick={() => setShowLockClock((current) => !current)}>시계 {showLockClock ? "표시" : "숨김"}</button><button type="button" className={showLockWidgets ? "active" : ""} onClick={() => setShowLockWidgets((current) => !current)}>위젯 {showLockWidgets ? "표시" : "숨김"}</button><button type="button" className={showSafeAreaGuide ? "active" : ""} onClick={() => setShowSafeAreaGuide((current) => !current)}>가림 영역</button></div>}
           </div>
           {previewMode === "lock" && <p className="preview-disclaimer"><span className="guide-brand"><i>▦</i> MATCHDAY</span> 점선은 시계·위젯·하단 버튼이 배경화면을 가릴 수 있는 위치예요. 저장 이미지에는 포함되지 않아요.</p>}
